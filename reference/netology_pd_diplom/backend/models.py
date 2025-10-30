@@ -23,7 +23,23 @@ USER_TYPE_CHOICES = (
 
 
 # Create your models here.
+class Address(models.Model):
+    """Модель адреса доставки"""
+    user = models.ForeignKey('User', on_delete=models.CASCADE, related_name='addresses', verbose_name='Пользователь')
+    city = models.CharField(max_length=100, verbose_name='Город')
+    street = models.CharField(max_length=100, verbose_name='Улица')
+    house = models.CharField(max_length=10, verbose_name='Дом')
+    apartment = models.CharField(max_length=10, verbose_name='Квартира', blank=True)
+    is_primary = models.BooleanField(default=False, verbose_name='Основной адрес')
+    created_at = models.DateTimeField(auto_now_add=True, verbose_name='Дата создания')
 
+    class Meta:
+        verbose_name = 'Адрес'
+        verbose_name_plural = 'Адреса'
+        ordering = ['-is_primary', '-created_at']
+
+    def __str__(self):
+        return f'{self.city}, {self.street}, {self.house}' + (f', кв. {self.apartment}' if self.apartment else '')
 
 class UserManager(BaseUserManager):
     """
@@ -232,6 +248,10 @@ class Order(models.Model):
                                 blank=True, null=True,
                                 on_delete=models.CASCADE)
 
+    address = models.ForeignKey(Address, on_delete=models.SET_NULL, null=True, blank=True,
+                                verbose_name='Адрес доставки')
+    total_price = models.DecimalField(max_digits=10, decimal_places=2, default=0, verbose_name='Общая стоимость')
+
     class Meta:
         verbose_name = 'Заказ'
         verbose_name_plural = "Список заказ"
@@ -243,7 +263,31 @@ class Order(models.Model):
     # @property
     # def sum(self):
     #     return self.ordered_items.aggregate(total=Sum("quantity"))["total"]
+    def calculate_total_price(self):
+        """Расчет общей стоимости заказа"""
+        total = sum(item.item_price for item in self.ordered_items.all())
+        self.total_price = total
+        self.save()
+        return total
 
+    def confirm_order(self, address_id=None):
+        """Подтверждение заказа"""
+        if address_id:
+            try:
+                self.address = Address.objects.get(id=address_id, user=self.user)
+            except Address.DoesNotExist:
+                raise ValueError("Адрес не найден")
+
+        if not self.address:
+            raise ValueError("Не указан адрес доставки")
+
+        if self.ordered_items.count() == 0:
+            raise ValueError("Корзина пуста")
+
+        self.status = 'new'
+        self.calculate_total_price()
+        self.save()
+        return self
 
 class OrderItem(models.Model):
     objects = models.manager.Manager()
@@ -261,7 +305,16 @@ class OrderItem(models.Model):
         constraints = [
             models.UniqueConstraint(fields=['order_id', 'product_info'], name='unique_order_item'),
         ]
+    @property
+    def item_price(self):
+        """Стоимость позиции"""
+        return self.quantity * self.product_info.price
 
+    def save(self, *args, **kwargs):
+        super().save(*args, **kwargs)
+        # Пересчитываем общую стоимость заказа при изменении элемента
+        if self.order:
+            self.order.calculate_total_price()
 
 class ConfirmEmailToken(models.Model):
     objects = models.manager.Manager()

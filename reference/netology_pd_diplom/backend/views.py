@@ -1,4 +1,3 @@
-from distutils.util import strtobool
 from rest_framework.request import Request
 from django.contrib.auth import authenticate
 from django.contrib.auth.password_validation import validate_password
@@ -14,13 +13,25 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 from ujson import loads as load_json
 from yaml import load as load_yaml, Loader
+from reference.netology_pd_diplom.backend.celery_tasks import async_partner_update
 
-from backend.models import Shop, Category, Product, ProductInfo, Parameter, ProductParameter, Order, OrderItem, \
+from reference.netology_pd_diplom.backend.models import Shop, Category, Product, ProductInfo, Parameter, ProductParameter, Order, OrderItem, \
     Contact, ConfirmEmailToken
-from backend.serializers import UserSerializer, CategorySerializer, ShopSerializer, ProductInfoSerializer, \
+from reference.netology_pd_diplom.backend.serializers import UserSerializer, CategorySerializer, ShopSerializer, ProductInfoSerializer, \
     OrderItemSerializer, OrderSerializer, ContactSerializer
-from backend.signals import new_user_registered, new_order
+from reference.netology_pd_diplom.backend.signals import new_user_registered, new_order
 
+
+def str_to_bool(value):
+    """Convert string to boolean"""
+    if isinstance(value, bool):
+        return value
+    if value.lower() in ('yes', 'true', 't', 'y', '1'):
+        return True
+    elif value.lower() in ('no', 'false', 'f', 'n', '0'):
+        return False
+    else:
+        raise ValueError(f"Invalid boolean value: {value}")
 
 class RegisterAccount(APIView):
     """
@@ -407,57 +418,160 @@ class PartnerUpdate(APIView):
 
     def post(self, request, *args, **kwargs):
         """
-                Update the partner price list information.
+        Update the partner price list information.
 
-                Args:
-                - request (Request): The Django request object.
+        Args:
+        - request (Request): The Django request object.
 
-                Returns:
-                - JsonResponse: The response indicating the status of the operation and any errors.
-                """
+        Returns:
+        - JsonResponse: The response indicating the status of the operation and any errors.
+        """
         if not request.user.is_authenticated:
             return JsonResponse({'Status': False, 'Error': 'Log in required'}, status=403)
 
         if request.user.type != 'shop':
             return JsonResponse({'Status': False, 'Error': 'Только для магазинов'}, status=403)
 
+        # Проверяем наличие файла или URL
+        file = request.FILES.get('file')
         url = request.data.get('url')
-        if url:
-            validate_url = URLValidator()
-            try:
-                validate_url(url)
-            except ValidationError as e:
-                return JsonResponse({'Status': False, 'Error': str(e)})
-            else:
-                stream = get(url).content
 
-                data = load_yaml(stream, Loader=Loader)
+        # Если нет ни файла ни URL - возвращаем ошибку
+        if not file and not url:
+            return JsonResponse({'Status': False, 'Error': 'Не указаны файл или URL'}, status=400)
 
-                shop, _ = Shop.objects.get_or_create(name=data['shop'], user_id=request.user.id)
-                for category in data['categories']:
-                    category_object, _ = Category.objects.get_or_create(id=category['id'], name=category['name'])
-                    category_object.shops.add(shop.id)
-                    category_object.save()
-                ProductInfo.objects.filter(shop_id=shop.id).delete()
-                for item in data['goods']:
-                    product, _ = Product.objects.get_or_create(name=item['name'], category_id=item['category'])
+        # Проверяем параметр async для асинхронной обработки
+        async_mode = request.data.get('async', 'false').lower() in ('true', '1', 'yes')
 
-                    product_info = ProductInfo.objects.create(product_id=product.id,
-                                                              external_id=item['id'],
-                                                              model=item['model'],
-                                                              price=item['price'],
-                                                              price_rrc=item['price_rrc'],
-                                                              quantity=item['quantity'],
-                                                              shop_id=shop.id)
-                    for name, value in item['parameters'].items():
-                        parameter_object, _ = Parameter.objects.get_or_create(name=name)
-                        ProductParameter.objects.create(product_info_id=product_info.id,
-                                                        parameter_id=parameter_object.id,
-                                                        value=value)
+        try:
+            if file:
+                # Обработка загруженного файла
+                if not file.name.endswith(('.yaml', '.yml')):
+                    return JsonResponse({'Status': False, 'Error': 'Wrong file format. Only YAML files are supported'},
+                                        status=400)
 
-                return JsonResponse({'Status': True})
+                yaml_data = file.read().decode('utf-8')
 
-        return JsonResponse({'Status': False, 'Errors': 'Не указаны все необходимые аргументы'})
+                if async_mode:
+                    # Асинхронная обработка файла
+                    from .celery_tasks import async_partner_update
+                    task = async_partner_update.delay(request.user.id, yaml_data, None)
+                    return JsonResponse({
+                        'Status': True,
+                        'Message': 'Import started in background',
+                        'task_id': task.id
+                    }, status=202)
+                else:
+                    # Синхронная обработка файла
+                    return self.sync_import_from_data(request.user, yaml_data)
+
+            elif url:
+                # Обработка URL
+                validate_url = URLValidator()
+                try:
+                    validate_url(url)
+                except ValidationError as e:
+                    return JsonResponse({'Status': False, 'Error': str(e)}, status=400)
+
+                if async_mode:
+                    # Асинхронная обработка URL
+                    from .celery_tasks import async_partner_update
+                    task = async_partner_update.delay(request.user.id, None, url)
+                    return JsonResponse({
+                        'Status': True,
+                        'Message': 'Import started in background',
+                        'task_id': task.id
+                    }, status=202)
+                else:
+                    # Синхронная обработка URL (существующая логика)
+                    return self.sync_import_from_url(request.user, url)
+
+        except Exception as e:
+            return JsonResponse({'Status': False, 'Error': str(e)}, status=400)
+
+    def sync_import_from_url(self, user, url):
+        """
+        Синхронный импорт из URL (сохраняем существующую логику)
+        """
+        stream = get(url).content
+        data = load_yaml(stream, Loader=Loader)
+
+        shop, _ = Shop.objects.get_or_create(name=data['shop'], user_id=user.id)
+
+        # Импорт категорий
+        for category in data['categories']:
+            category_object, _ = Category.objects.get_or_create(id=category['id'], name=category['name'])
+            category_object.shops.add(shop.id)
+            category_object.save()
+
+        # Удаляем старые товары и импортируем новые
+        ProductInfo.objects.filter(shop_id=shop.id).delete()
+
+        for item in data['goods']:
+            product, _ = Product.objects.get_or_create(name=item['name'], category_id=item['category'])
+
+            product_info = ProductInfo.objects.create(product_id=product.id,
+                                                      external_id=item['id'],
+                                                      model=item['model'],
+                                                      price=item['price'],
+                                                      price_rrc=item['price_rrc'],
+                                                      quantity=item['quantity'],
+                                                      shop_id=shop.id)
+
+            # Импорт параметров
+            for name, value in item['parameters'].items():
+                parameter_object, _ = Parameter.objects.get_or_create(name=name)
+                ProductParameter.objects.create(product_info_id=product_info.id,
+                                                parameter_id=parameter_object.id,
+                                                value=value)
+
+        return JsonResponse({'Status': True, 'Message': 'Import from URL completed successfully'})
+
+    def sync_import_from_data(self, user, yaml_data):
+        """
+        Синхронный импорт из YAML данных
+        """
+        data = load_yaml(yaml_data, Loader=Loader)
+
+        shop, _ = Shop.objects.get_or_create(name=data['shop'], user_id=user.id)
+
+        # Импорт категорий
+        for category in data['categories']:
+            category_object, _ = Category.objects.get_or_create(id=category['id'], name=category['name'])
+            category_object.shops.add(shop.id)
+            category_object.save()
+
+        # Удаляем старые товары и импортируем новые
+        ProductInfo.objects.filter(shop_id=shop.id).delete()
+
+        imported_count = 0
+        for item in data['goods']:
+            product, _ = Product.objects.get_or_create(name=item['name'], category_id=item['category'])
+
+            product_info = ProductInfo.objects.create(product_id=product.id,
+                                                      external_id=item['id'],
+                                                      model=item['model'],
+                                                      price=item['price'],
+                                                      price_rrc=item['price_rrc'],
+                                                      quantity=item['quantity'],
+                                                      shop_id=shop.id)
+            imported_count += 1
+
+            # Импорт параметров
+            for name, value in item['parameters'].items():
+                parameter_object, _ = Parameter.objects.get_or_create(name=name)
+                ProductParameter.objects.create(product_info_id=product_info.id,
+                                                parameter_id=parameter_object.id,
+                                                value=value)
+
+        return JsonResponse({
+            'Status': True,
+            'Message': 'Import from file completed successfully',
+            'Details': {
+                'products_imported': imported_count,
+                'categories_processed': len(data['categories'])
+            }
+        })
 
 
 class PartnerState(APIView):

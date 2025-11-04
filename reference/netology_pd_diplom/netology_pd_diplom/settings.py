@@ -123,17 +123,36 @@ STATIC_URL = '/static/'
 
 AUTH_USER_MODEL = 'backend.User'
 
+# Email Settings
 EMAIL_BACKEND = 'django.core.mail.backends.smtp.EmailBackend'
-# EMAIL_USE_TLS = True
-
 EMAIL_HOST = 'smtp.mail.ru'
-
 EMAIL_HOST_USER = 'netology.diplom@mail.ru'
 EMAIL_HOST_PASSWORD = 'CLdm7yW4U9nivz9mbexu'
 EMAIL_PORT = '465'
 EMAIL_USE_SSL = True
 SERVER_EMAIL = EMAIL_HOST_USER
+DEFAULT_FROM_EMAIL = EMAIL_HOST_USER
 
+# Адреса администраторов для уведомлений о новых заказах
+ADMIN_EMAILS = ['netology.diplom@mail.ru']  # можно добавить другие email
+
+# Базовый URL для приложения (для ссылок в email)
+BASE_URL = 'http://localhost:8000'  # для разработки
+
+# Celery Configuration
+CELERY_BROKER_URL = 'redis://localhost:6379/0'  # Redis как брокер сообщений
+CELERY_RESULT_BACKEND = 'redis://localhost:6379/0'  # Redis для хранения результатов
+CELERY_ACCEPT_CONTENT = ['json']
+CELERY_TASK_SERIALIZER = 'json'
+CELERY_RESULT_SERIALIZER = 'json'
+CELERY_TIMEZONE = 'UTC'
+CELERY_TASK_TRACK_STARTED = True
+CELERY_TASK_TIME_LIMIT = 30 * 60  # 30 минут лимит на выполнение задачи
+
+# Настройки для длительных задач (импорт товаров)
+CELERY_TASK_SOFT_TIME_LIMIT = 25 * 60  # 25 минут мягкий лимит
+
+# Django REST Framework settings
 REST_FRAMEWORK = {
     'DEFAULT_PAGINATION_CLASS': 'rest_framework.pagination.PageNumberPagination',
     'PAGE_SIZE': 40,
@@ -150,5 +169,17 @@ REST_FRAMEWORK = {
     ),
 
 }
+
+# Настройки для сброса пароля
+DJANGO_REST_PASSWORDRESET_TOKEN_CONFIG = {
+    "CLASS": "django_rest_passwordreset.tokens.RandomStringTokenGenerator",
+    "OPTIONS": {
+        "min_length": 20,
+        "max_length": 30
+    }
+}
+
+# Настройки для подтверждения email
+CONFIRM_EMAIL_TOKEN_LIFETIME = 24  # часов
 
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'

@@ -260,9 +260,6 @@ class Order(models.Model):
     def __str__(self):
         return str(self.dt)
 
-    # @property
-    # def sum(self):
-    #     return self.ordered_items.aggregate(total=Sum("quantity"))["total"]
     def calculate_total_price(self):
         """Расчет общей стоимости заказа"""
         total = sum(item.item_price for item in self.ordered_items.all())
@@ -284,7 +281,8 @@ class Order(models.Model):
         if self.ordered_items.count() == 0:
             raise ValueError("Корзина пуста")
 
-        self.status = 'new'
+        # ИСПРАВЛЕНИЕ: используем state вместо status
+        self.state = 'new'
         self.calculate_total_price()
         self.save()
         return self

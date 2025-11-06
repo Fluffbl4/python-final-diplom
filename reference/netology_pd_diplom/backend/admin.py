@@ -1,7 +1,7 @@
 from django.contrib import admin
 from django.contrib.auth.admin import UserAdmin
 
-from reference.netology_pd_diplom.backend.models import User, Shop, Category, Product, ProductInfo, Parameter, ProductParameter, Order, OrderItem, \
+from .models import User, Shop, Category, Product, ProductInfo, Parameter, ProductParameter, Order, OrderItem, \
     Contact, ConfirmEmailToken, Address
 
 
@@ -71,17 +71,17 @@ class ProductParameterAdmin(admin.ModelAdmin):
 
 @admin.register(Order)
 class OrderAdmin(admin.ModelAdmin):
-    list_display = ('id', 'user', 'status', 'total_price', 'dt', 'address')
-    list_filter = ('status', 'dt')
+    list_display = ('id', 'user', 'state', 'total_price', 'dt', 'address', 'contact')
+    list_filter = ('state', 'dt')
     search_fields = ('user__email', 'id')
     readonly_fields = ('dt', 'total_price')
-    list_select_related = ('user', 'address')
+    list_select_related = ('user', 'address', 'contact')
 
 
 @admin.register(OrderItem)
 class OrderItemAdmin(admin.ModelAdmin):
     list_display = ('id', 'order', 'product_info', 'quantity', 'item_price')
-    list_filter = ('order__status',)
+    list_filter = ('order__state',)
     search_fields = ('order__id', 'product_info__product__name')
     readonly_fields = ('item_price',)
     list_select_related = ('order', 'product_info')

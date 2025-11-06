@@ -15,13 +15,13 @@ from ujson import loads as load_json
 from yaml import load as load_yaml, Loader
 from django.db import transaction
 
-from reference.netology_pd_diplom.backend.celery_tasks import async_partner_update
+from .celery_tasks import async_partner_update
 
-from reference.netology_pd_diplom.backend.models import Shop, Category, Product, ProductInfo, Parameter, ProductParameter, Order, OrderItem, \
-    Contact, ConfirmEmailToken
-from reference.netology_pd_diplom.backend.serializers import UserSerializer, CategorySerializer, ShopSerializer, ProductInfoSerializer, \
+from .models import Shop, Category, Product, ProductInfo, Parameter, ProductParameter, Order, OrderItem, \
+    Contact, ConfirmEmailToken, User
+from .serializers import UserSerializer, CategorySerializer, ShopSerializer, ProductInfoSerializer, \
     OrderItemSerializer, OrderSerializer, ContactSerializer
-from reference.netology_pd_diplom.backend.signals import new_user_registered, new_order
+from .signals import new_user_registered, new_order
 
 
 def str_to_bool(value):
@@ -185,27 +185,32 @@ class LoginAccount(APIView):
     Класс для авторизации пользователей
     """
 
-    # Авторизация методом POST
     def post(self, request, *args, **kwargs):
         """
-                Authenticate a user.
+        Authenticate a user.
 
-                Args:
-                    request (Request): The Django request object.
+        Args:
+            request (Request): The Django request object.
 
-                Returns:
-                    JsonResponse: The response indicating the status of the operation and any errors.
-                """
+        Returns:
+            JsonResponse: The response indicating the status of the operation and any errors.
+        """
         if {'email', 'password'}.issubset(request.data):
-            user = authenticate(request, username=request.data['email'], password=request.data['password'])
+            try:
+                # Ищем пользователя по email
+                user = User.objects.get(email=request.data['email'])
+            except User.DoesNotExist:
+                return JsonResponse({'Status': False, 'Errors': 'Пользователь не найден'})
 
-            if user is not None:
+            # Проверяем пароль
+            if user.check_password(request.data['password']):
                 if user.is_active:
                     token, _ = Token.objects.get_or_create(user=user)
-
                     return JsonResponse({'Status': True, 'Token': token.key})
-
-            return JsonResponse({'Status': False, 'Errors': 'Не удалось авторизовать'})
+                else:
+                    return JsonResponse({'Status': False, 'Errors': 'Аккаунт не активирован'})
+            else:
+                return JsonResponse({'Status': False, 'Errors': 'Неверный пароль'})
 
         return JsonResponse({'Status': False, 'Errors': 'Не указаны все необходимые аргументы'})
 
@@ -342,13 +347,26 @@ class BasketView(APIView):
         if not request.user.is_authenticated:
             return JsonResponse({'Status': False, 'Error': 'Log in required'}, status=403)
 
-        items_sting = request.data.get('items')
-        if items_sting:
+        items_data = request.data.get('items')
+        if items_data:
             try:
-                items_dict = load_json(items_sting)
+                # Обрабатываем оба формата: строку JSON и готовый объект
+                if isinstance(items_data, str):
+                    # Если items - это строка, парсим её как JSON
+                    items_dict = load_json(items_data)
+                elif isinstance(items_data, (list, dict)):
+                    # Если items - это уже список/словарь, используем как есть
+                    items_dict = items_data
+                else:
+                    return JsonResponse({'Status': False, 'Errors': 'Неверный формат данных'})
+
             except ValueError:
                 return JsonResponse({'Status': False, 'Errors': 'Неверный формат запроса'})
             else:
+                # Обеспечиваем что items_dict это список
+                if isinstance(items_dict, dict):
+                    items_dict = [items_dict]
+
                 basket, _ = Order.objects.get_or_create(user_id=request.user.id, state='basket')
                 objects_created = 0
                 errors = []
@@ -467,13 +485,26 @@ class BasketView(APIView):
         if not request.user.is_authenticated:
             return JsonResponse({'Status': False, 'Error': 'Log in required'}, status=403)
 
-        items_sting = request.data.get('items')
-        if items_sting:
+        items_data = request.data.get('items')
+        if items_data:
             try:
-                items_dict = load_json(items_sting)
+                # Обрабатываем оба формата: строку JSON и готовый объект
+                if isinstance(items_data, str):
+                    # Если items - это строка, парсим её как JSON
+                    items_dict = load_json(items_data)
+                elif isinstance(items_data, (list, dict)):
+                    # Если items - это уже список/словарь, используем как есть
+                    items_dict = items_data
+                else:
+                    return JsonResponse({'Status': False, 'Errors': 'Неверный формат данных'})
+
             except ValueError:
                 return JsonResponse({'Status': False, 'Errors': 'Неверный формат запроса'})
             else:
+                # Обеспечиваем что items_dict это список
+                if isinstance(items_dict, dict):
+                    items_dict = [items_dict]
+
                 basket, _ = Order.objects.get_or_create(user_id=request.user.id, state='basket')
                 objects_updated = 0
                 errors = []
@@ -804,29 +835,13 @@ class PartnerOrders(APIView):
 
 class ContactView(APIView):
     """
-       A class for managing contact information.
+    A class for managing contact information.
+    """
 
-       Methods:
-       - get: Retrieve the contact information of the authenticated user.
-       - post: Create a new contact for the authenticated user.
-       - put: Update the contact information of the authenticated user.
-       - delete: Delete the contact of the authenticated user.
-
-       Attributes:
-       - None
-       """
-
-    # получить мои контакты
     def get(self, request, *args, **kwargs):
         """
-               Retrieve the contact information of the authenticated user.
-
-               Args:
-               - request (Request): The Django request object.
-
-               Returns:
-               - Response: The response containing the contact information.
-               """
+        Retrieve the contact information of the authenticated user.
+        """
         if not request.user.is_authenticated:
             return JsonResponse({'Status': False, 'Error': 'Log in required'}, status=403)
         contact = Contact.objects.filter(
@@ -834,24 +849,19 @@ class ContactView(APIView):
         serializer = ContactSerializer(contact, many=True)
         return Response(serializer.data)
 
-    # добавить новый контакт
     def post(self, request, *args, **kwargs):
         """
-               Create a new contact for the authenticated user.
-
-               Args:
-               - request (Request): The Django request object.
-
-               Returns:
-               - JsonResponse: The response indicating the status of the operation and any errors.
-               """
+        Create a new contact for the authenticated user.
+        """
         if not request.user.is_authenticated:
             return JsonResponse({'Status': False, 'Error': 'Log in required'}, status=403)
 
         if {'city', 'street', 'phone'}.issubset(request.data):
-            request.data._mutable = True
-            request.data.update({'user': request.user.id})
-            serializer = ContactSerializer(data=request.data)
+            # Создаем копию данных и добавляем user_id
+            data = request.data.copy()
+            data['user'] = request.user.id
+
+            serializer = ContactSerializer(data=data)
 
             if serializer.is_valid():
                 serializer.save()
@@ -861,17 +871,10 @@ class ContactView(APIView):
 
         return JsonResponse({'Status': False, 'Errors': 'Не указаны все необходимые аргументы'})
 
-    # удалить контакт
     def delete(self, request, *args, **kwargs):
         """
-               Delete the contact of the authenticated user.
-
-               Args:
-               - request (Request): The Django request object.
-
-               Returns:
-               - JsonResponse: The response indicating the status of the operation and any errors.
-               """
+        Delete the contact of the authenticated user.
+        """
         if not request.user.is_authenticated:
             return JsonResponse({'Status': False, 'Error': 'Log in required'}, status=403)
 
@@ -890,18 +893,11 @@ class ContactView(APIView):
                 return JsonResponse({'Status': True, 'Удалено объектов': deleted_count})
         return JsonResponse({'Status': False, 'Errors': 'Не указаны все необходимые аргументы'})
 
-    # редактировать контакт
     def put(self, request, *args, **kwargs):
+        """
+        Update the contact information of the authenticated user.
+        """
         if not request.user.is_authenticated:
-            """
-                   Update the contact information of the authenticated user.
-
-                   Args:
-                   - request (Request): The Django request object.
-
-                   Returns:
-                   - JsonResponse: The response indicating the status of the operation and any errors.
-                   """
             return JsonResponse({'Status': False, 'Error': 'Log in required'}, status=403)
 
         if 'id' in request.data:
@@ -1063,12 +1059,21 @@ class OrderView(APIView):
                         basket.state = 'new'
                         basket.save()
 
-                        # Отправляем email уведомление
-                        from .celery_tasks import send_order_confirmation_email
-                        send_order_confirmation_email.delay(basket.id)
+                        # ДОБАВЛЕНО: Импорт внутри блока try для избежания ошибок импорта
+                        try:
+                            from backend.celery_tasks import send_order_confirmation_email
+                            send_order_confirmation_email.delay(basket.id)
+                        except ImportError as e:
+                            print(f"Celery task import error: {e}")
+                            # Продолжаем выполнение даже если celery недоступен
 
                         # Отправляем сигнал (если нужно)
-                        new_order.send(sender=self.__class__, user_id=request.user.id)
+                        try:
+                            from django.db.models.signals import post_save
+                            from django.dispatch import receiver
+                            new_order.send(sender=self.__class__, user_id=request.user.id)
+                        except Exception as e:
+                            print(f"Signal error: {e}")
 
                         return JsonResponse({
                             'Status': True,
@@ -1135,11 +1140,18 @@ class OrderView(APIView):
                     basket.state = 'new'
                     basket.save()
 
-                    # Отправляем email уведомление
-                    from .celery_tasks import send_order_confirmation_email
-                    send_order_confirmation_email.delay(basket.id)
+                    # ДОБАВЛЕНО: Импорт внутри блока try для избежания ошибок импорта
+                    try:
+                        from backend.celery_tasks import send_order_confirmation_email
+                        send_order_confirmation_email.delay(basket.id)
+                    except ImportError as e:
+                        print(f"Celery task import error: {e}")
+                        # Продолжаем выполнение даже если celery недоступен
 
-                    new_order.send(sender=self.__class__, user_id=request.user.id)
+                    try:
+                        new_order.send(sender=self.__class__, user_id=request.user.id)
+                    except Exception as e:
+                        print(f"Signal error: {e}")
 
                     return JsonResponse({
                         'Status': True,
@@ -1237,9 +1249,13 @@ class OrderView(APIView):
                 order.state = 'canceled'
                 order.save()
 
-                # Отправляем уведомление об отмене
-                from .celery_tasks import send_order_status_update_email
-                send_order_status_update_email.delay(order.id, 'new', 'canceled')
+                # ДОБАВЛЕНО: Импорт внутри блока try для избежания ошибок импорта
+                try:
+                    from backend.celery_tasks import send_order_status_update_email
+                    send_order_status_update_email.delay(order.id, 'new', 'canceled')
+                except ImportError as e:
+                    print(f"Celery task import error: {e}")
+                    # Продолжаем выполнение даже если celery недоступен
 
                 return JsonResponse({
                     'Status': True,

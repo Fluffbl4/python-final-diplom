@@ -11,9 +11,11 @@ from rest_framework.authtoken.models import Token
 from rest_framework.generics import ListAPIView
 from rest_framework.response import Response
 from rest_framework.views import APIView
+from rest_framework import status
 from ujson import loads as load_json
 from yaml import load as load_yaml, Loader
 from django.db import transaction
+from drf_spectacular.utils import extend_schema
 
 from .celery_tasks import async_partner_update
 
@@ -56,7 +58,6 @@ class RegisterAccount(APIView):
         if {'first_name', 'last_name', 'email', 'password', 'company', 'position'}.issubset(request.data):
 
             # проверяем пароль на сложность
-            sad = 'asd'
             try:
                 validate_password(request.data['password'])
             except Exception as password_error:
@@ -1266,3 +1267,52 @@ class OrderView(APIView):
             return JsonResponse({'Status': False, 'Error': 'Заказ не найден или нельзя отменить'}, status=404)
         except Exception as e:
             return JsonResponse({'Status': False, 'Error': str(e)}, status=400)
+
+class TestErrorView(APIView):
+    """
+    Тестовый View для генерации ошибок (Sentry тестирование)
+    """
+
+    extend_schema(
+        description="Генерирует тестовую ошибку для проверки Sentry",
+        responses={500: None}
+    )
+    def get(self, request):
+        # Генерируем ошибку для тестирования Sentry
+        raise Exception("Это тестовая ошибка для проверки интеграции с Sentry")
+
+
+class TestThrottlingView(APIView):
+    """
+    Тестовый View для проверки throttling
+    """
+    @extend_schema(
+        description="Тестовый endpoint для проверки ограничения запросов",
+        responses={200: None, 429: None}
+    )
+    def get(self, request):
+        return Response({
+            "message": "Throttling test endpoint",
+            "status": "success"
+        })
+
+
+class SocialAuthTestView(APIView):
+    """
+    Тестовый View для проверки социальной авторизации
+    """
+    @extend_schema(
+        description="Проверка статуса социальной авторизации",
+        responses={200: None}
+    )
+    def get(self, request):
+        if request.user.is_authenticated:
+            return Response({
+                "message": f"Пользователь авторизован: {request.user.email}",
+                "is_authenticated": True
+            })
+        else:
+            return Response({
+                "message": "Пользователь не авторизован",
+                "is_authenticated": False
+            })

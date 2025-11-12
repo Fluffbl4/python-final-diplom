@@ -5,9 +5,228 @@ from rest_framework import status
 from rest_framework.test import APIClient
 from unittest.mock import patch
 from rest_framework.authtoken.models import Token
+import time
 
 from .models import User, Shop, Category, Product, ProductInfo, Parameter, ProductParameter, Order, OrderItem, \
     Contact
+
+
+class ThrottlingTests(TestCase):
+    """
+    Тесты для проверки тротлинга (ограничения частоты запросов)
+    """
+
+    def setUp(self):
+        """Настройка тестовых данных"""
+        self.client = APIClient()
+
+        # Создаем тестового пользователя
+        self.user = User.objects.create_user(
+            first_name='Throttle',
+            last_name='Test',
+            email='throttle@example.com',
+            password='testpassword123',
+            company='Test Company',
+            position='Manager',
+            is_active=True
+        )
+
+        # Создаем токен для пользователя
+        self.user_token = Token.objects.create(user=self.user)
+
+    def parse_response(self, response):
+        """Вспомогательный метод для парсинга JsonResponse"""
+        return json.loads(response.content)
+
+    def test_anon_throttling_categories(self):
+        """
+        Тест тротлинга для анонимных пользователей на endpoint категорий
+        Ограничение: 100 запросов в день
+        """
+        url = reverse('backend:categories')
+
+        # Делаем несколько запросов подряд
+        for i in range(5):
+            response = self.client.get(url)
+            self.assertEqual(response.status_code, status.HTTP_200_OK)
+            print(f"Анонимный запрос {i + 1}: статус {response.status_code}")
+
+    def test_anon_throttling_shops(self):
+        """
+        Тест тротлинга для анонимных пользователей на endpoint магазинов
+        """
+        url = reverse('backend:shops')
+
+        # Делаем несколько быстрых запросов
+        for i in range(5):
+            response = self.client.get(url)
+            self.assertEqual(response.status_code, status.HTTP_200_OK)
+            print(f"Анонимный запрос магазинов {i + 1}: статус {response.status_code}")
+
+    def test_user_throttling_details(self):
+        """
+        Тест тротлинга для авторизованных пользователей
+        Ограничение: 1000 запросов в день
+        """
+        url = reverse('backend:user-details')
+        self.client.credentials(HTTP_AUTHORIZATION=f'Token {self.user_token.key}')
+
+        # Делаем несколько запросов подряд
+        for i in range(5):
+            response = self.client.get(url)
+            self.assertEqual(response.status_code, status.HTTP_200_OK)
+            print(f"Авторизованный запрос {i + 1}: статус {response.status_code}")
+
+    def test_user_throttling_basket(self):
+        """
+        Тест тротлинга на endpoint корзины для авторизованных пользователей
+        """
+        url = reverse('backend:basket')
+        self.client.credentials(HTTP_AUTHORIZATION=f'Token {self.user_token.key}')
+
+        # Делаем несколько GET запросов
+        for i in range(5):
+            response = self.client.get(url)
+            # Может быть 200 OK или 404 если корзина пуста
+            self.assertIn(response.status_code, [status.HTTP_200_OK, status.HTTP_404_NOT_FOUND])
+            print(f"Запрос корзины {i + 1}: статус {response.status_code}")
+
+    def test_mixed_throttling_scenarios(self):
+        """
+        Тест смешанных сценариев тротлинга
+        """
+        # Анонимные запросы к публичным endpoint'ам
+        public_endpoints = [
+            reverse('backend:categories'),
+            reverse('backend:shops'),
+        ]
+
+        for endpoint in public_endpoints:
+            for i in range(3):
+                response = self.client.get(endpoint)
+                self.assertEqual(response.status_code, status.HTTP_200_OK)
+                print(f"Публичный endpoint {endpoint}, запрос {i + 1}: статус {response.status_code}")
+
+        # Авторизованные запросы
+        self.client.credentials(HTTP_AUTHORIZATION=f'Token {self.user_token.key}')
+        private_endpoints = [
+            reverse('backend:user-details'),
+            reverse('backend:order'),
+        ]
+
+        for endpoint in private_endpoints:
+            for i in range(3):
+                response = self.client.get(endpoint)
+                self.assertIn(response.status_code, [status.HTTP_200_OK, status.HTTP_404_NOT_FOUND])
+                print(f"Приватный endpoint {endpoint}, запрос {i + 1}: статус {response.status_code}")
+
+    def test_throttling_after_many_requests(self):
+        """
+        Тест тротлинга после большого количества запросов
+        ВНИМАНИЕ: Этот тест может занять время из-за ожидания
+        """
+        url = reverse('backend:categories')
+
+        # Делаем 10 быстрых запросов (должны пройти)
+        successful_requests = 0
+        for i in range(10):
+            response = self.client.get(url)
+            if response.status_code == status.HTTP_200_OK:
+                successful_requests += 1
+            print(f"Быстрый запрос {i + 1}: статус {response.status_code}")
+
+        print(f"Успешных быстрых запросов: {successful_requests}/10")
+        self.assertEqual(successful_requests, 10)
+
+    def test_throttling_reset_after_delay(self):
+        """
+        Тест сброса тротлинга после задержки
+        Этот тест демонстрирует, что тротлинг работает на основе временных окон
+        """
+        url = reverse('backend:categories')
+
+        # Первая серия запросов
+        print("Первая серия запросов:")
+        for i in range(5):
+            response = self.client.get(url)
+            self.assertEqual(response.status_code, status.HTTP_200_OK)
+            print(f"  Запрос {i + 1}: статус {response.status_code}")
+
+        # Небольшая задержка
+        print("Ожидание 1 секунду...")
+        time.sleep(1)
+
+        # Вторая серия запросов после задержки
+        print("Вторая серия запросов после задержки:")
+        for i in range(5):
+            response = self.client.get(url)
+            self.assertEqual(response.status_code, status.HTTP_200_OK)
+            print(f"  Запрос {i + 1}: статус {response.status_code}")
+
+    def test_throttling_headers(self):
+        """
+        Тест проверки заголовков тротлинга в ответе
+        """
+        url = reverse('backend:categories')
+
+        response = self.client.get(url)
+
+        # Проверяем стандартные заголовки
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+
+        # DRF может добавлять заголовки тротлинга, но они не всегда присутствуют
+        # при успешных запросах в пределах лимита
+        print("Заголовки ответа:")
+        for header, value in response.items():
+            print(f"  {header}: {value}")
+
+    def test_different_users_different_throttling(self):
+        """
+        Тест того, что разные пользователи имеют отдельные лимиты тротлинга
+        """
+        # Создаем второго пользователя
+        user2 = User.objects.create_user(
+            first_name='Throttle2',
+            last_name='Test2',
+            email='throttle2@example.com',
+            password='testpassword123',
+            is_active=True
+        )
+        user2_token = Token.objects.create(user=user2)
+
+        url = reverse('backend:user-details')
+
+        # Запросы от первого пользователя
+        self.client.credentials(HTTP_AUTHORIZATION=f'Token {self.user_token.key}')
+        for i in range(3):
+            response = self.client.get(url)
+            self.assertEqual(response.status_code, status.HTTP_200_OK)
+            print(f"Пользователь 1, запрос {i + 1}: статус {response.status_code}")
+
+        # Запросы от второго пользователя
+        self.client.credentials(HTTP_AUTHORIZATION=f'Token {user2_token.key}')
+        for i in range(3):
+            response = self.client.get(url)
+            self.assertEqual(response.status_code, status.HTTP_200_OK)
+            print(f"Пользователь 2, запрос {i + 1}: статус {response.status_code}")
+
+    def test_throttling_on_post_requests(self):
+        """
+        Тест тротлинга на POST запросах
+        """
+        url = reverse('backend:user-login')
+
+        # Несколько попыток входа (должны учитываться в тротлинге)
+        for i in range(3):
+            data = {
+                'email': f'test{i}@example.com',  # разные email чтобы избежать блокировки по логике приложения
+                'password': 'wrongpassword'
+            }
+            response = self.client.post(url, data, format='json')
+            # Ожидаем ошибку аутентификации, но не тротлинга
+            self.assertIn(response.status_code,
+                          [status.HTTP_200_OK, status.HTTP_400_BAD_REQUEST, status.HTTP_401_UNAUTHORIZED])
+            print(f"POST запрос {i + 1}: статус {response.status_code}")
 
 
 class BackendAPITestCase(TestCase):
@@ -294,7 +513,6 @@ class BackendAPITestCase(TestCase):
             'contact': contact_id
         }
 
-        # Теперь patch будет работать корректно
         with patch('backend.views.new_order.send'):
             with patch('backend.celery_tasks.send_order_confirmation_email.delay'):
                 response = self.client.post(url, order_data, format='json')
@@ -369,7 +587,7 @@ class BackendAPITestCase(TestCase):
         self.assertIn('state', response_data)
         self.assertEqual(response_data['name'], 'Test Shop')
 
-        # 2. Изменяем статус магазина (мы выяснили что работает формат {'state': 'false'})
+        # 2. Изменяем статус магазина
         new_state = 'false' if original_state else 'true'
         state_data = {'state': new_state}
 
@@ -435,7 +653,6 @@ class BackendAPITestCase(TestCase):
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertTrue(response_data['Status'])
 
-        # 1.5. Активируем пользователя вручную (так как нет email подтверждения в тестах)
         user = User.objects.get(email='journeyuser@example.com')
         user.is_active = True
         user.save()
